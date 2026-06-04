@@ -947,21 +947,7 @@ fn create_mirror(original: &Path, mirror: &Path, ignores: &IgnoreNode) {
             .canonicalize()
             .expect("Could not canonicalize original path");
 
-        let common_root = original
-            .iter()
-            .zip(mirror.iter())
-            .take_while(|(a, b)| a == b)
-            .map(|(a, _)| a)
-            .collect::<PathBuf>();
-
-        let mirror_from_common = mirror.strip_prefix(&common_root).unwrap();
-        let original_from_common = original.strip_prefix(&common_root).unwrap();
-        let link_original: PathBuf = (0..mirror_from_common.iter().count() - 1)
-            .map(|_| Path::new(".."))
-            .chain(iter::once(original_from_common))
-            .collect();
-
-        return symlink(link_original, mirror).expect("Symlinking the mirror fragment");
+        return symlink(original, mirror).expect("Symlinking the mirror fragment");
     }
 
     let original_traversal = original
