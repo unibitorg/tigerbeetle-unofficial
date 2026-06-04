@@ -10,6 +10,8 @@ use std::{
 };
 
 use quote::{quote, ToTokens as _};
+use serde::Deserialize;
+use sha2::{Digest as _, Sha256};
 use syn::{parse_quote, visit::Visit, visit_mut::VisitMut};
 
 /// Version of the used [TigerBeetle] release.
@@ -19,6 +21,36 @@ const TIGERBEETLE_RELEASE: &str = "0.16.78";
 
 /// Commit hash of the [`TIGERBEETLE_RELEASE`].
 const TIGERBEETLE_COMMIT: &str = "c3d9b09dc88e94dde9ac915c6e94a4c650332080";
+
+#[derive(Debug, Deserialize)]
+struct PrebuiltManifest {
+    schema_version: u32,
+    tigerbeetle_release: String,
+    tigerbeetle_commit: String,
+    sys_crate_version: String,
+    headers: PrebuiltHeaders,
+    targets: BTreeMap<String, PrebuiltTarget>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrebuiltHeaders {
+    #[serde(rename = "tb_client.h")]
+    tb_client_h: PrebuiltFile,
+    #[serde(rename = "wrapper.h")]
+    wrapper_h: PrebuiltFile,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrebuiltTarget {
+    tigerbeetle_lib_subdir: String,
+    lib: PrebuiltFile,
+}
+
+#[derive(Debug, Deserialize)]
+struct PrebuiltFile {
+    path: String,
+    sha256: String,
+}
 
 fn target_to_lib_dir(target: &str) -> Option<&'static str> {
     match target {
@@ -58,7 +90,18 @@ fn main() {
     println!("cargo:rerun-if-env-changed=DOCS_RS");
     println!("cargo:rerun-if-env-changed=TB_CLIENT_DEBUG");
     println!("cargo:rerun-if-env-changed=ZIG_PATH");
-    println!("cargo:rerun-if-changed=src/wrapper.h");
+    println!("cargo:rerun-if-env-changed=TIGERBEETLE_USE_PREBUILT");
+    println!("cargo:rerun-if-env-changed=TIGERBEETLE_ALLOW_ZIG_FALLBACK");
+    println!("cargo:rerun-if-env-changed=TIGERBEETLE_PREBUILT_DIR");
+    println!("cargo:rerun-if-env-changed=TIGERBEETLE_PREBUILT_MANIFEST");
+    println!(
+        "cargo:rerun-if-changed={}",
+        crate_path("src/wrapper.h").display()
+    );
+    println!(
+        "cargo:rerun-if-changed={}",
+        crate_path("src/tb_client.h").display()
+    );
 
     let wrapper;
     if env::var("DOCS_RS").is_ok() {
@@ -66,121 +109,39 @@ fn main() {
     } else {
         let target_lib_subdir = target_to_lib_dir(&target)
             .unwrap_or_else(|| panic!("target `{target:?}` is not supported"));
-
-        let tigerbeetle_target = target_to_tigerbeetle_target(&target)
-            .unwrap_or_else(|| panic!("target `{target:?}` is not supported"));
-
-        let tigerbeetle_root = out_dir.join("tigerbeetle");
-        fs::remove_dir_all(&tigerbeetle_root)
-            .or_else(|e| {
-                if let io::ErrorKind::NotFound = e.kind() {
-                    Ok(())
-                } else {
-                    Err(e)
+        wrapper = if env_flag("TIGERBEETLE_USE_PREBUILT") {
+            match load_prebuilt(&target, target_lib_subdir) {
+                Ok(prebuilt) => {
+                    emit_link_directives(&target, prebuilt.library.parent().unwrap());
+                    assert_prebuilt_headers_match_crate(&prebuilt);
+                    prebuilt.wrapper
                 }
-            })
-            .unwrap();
-        create_mirror(
-            "tigerbeetle".as_ref(),
-            &tigerbeetle_root,
-            &["src/clients/c/lib", "zig-cache", "zig-out", ".git"]
-                .into_iter()
-                .collect(),
-        );
-
-        // Check for `ZIG_PATH` env var to use system preinstalled Zig instead of downloading one.
-        let zig_path: PathBuf = if let Some(zig_path) = env::var_os("ZIG_PATH") {
-            let path = PathBuf::from(&zig_path);
-            assert!(
-                path.exists(),
-                "`ZIG_PATH` is set to `{}` but the file does not exist",
-                path.display(),
-            );
-            path
-        } else {
-            // Download ZIG using the bundled downloader script.
-            let status = if cfg!(windows) {
-                let mut cmd = Command::new("pwsh");
-                _ = cmd.arg(tigerbeetle_root.join("zig/download.win.ps1"));
-                cmd
-            } else {
-                // TODO: Use the original `zig/download.sh` once tigerbeetle/tigerbeetle@394d012c
-                //       gets released.
-
-                let orig_path = tigerbeetle_root.join("zig/download.sh");
-                let patched_path = out_dir.join("zig_download.patched.sh");
-
-                let download_script = fs::read_to_string(&orig_path)
-                    .expect("failed to read `zig/download.sh`")
-                    .replace(
-                        "curl --silent --output",
-                        "curl --location --silent --output",
+                Err(reason) if env_flag("TIGERBEETLE_ALLOW_ZIG_FALLBACK") => {
+                    println!(
+                        "cargo:warning=TigerBeetle prebuilt artifact unavailable for target \
+                         {target}; explicit TIGERBEETLE_ALLOW_ZIG_FALLBACK=1 set, running Zig \
+                         build. reason: {reason}"
                     );
-                fs::copy(&orig_path, &patched_path).expect("failed to copy `zig/download.sh`");
-                fs::write(&patched_path, download_script)
-                    .expect("failed to patch `zig/download.sh`");
-
-                Command::new(patched_path)
+                    build_with_zig(&out_dir, &target, target_lib_subdir, debug)
+                }
+                Err(reason) => {
+                    panic!(
+                        "TigerBeetle prebuilt artifact validation failed for target `{target}`: \
+                         {reason}. Explicit prebuilt mode is fail-closed; run \
+                         scripts/ci/update-tigerbeetle-client-vendor.sh or set \
+                         TIGERBEETLE_ALLOW_ZIG_FALLBACK=1 for an intentional fallback."
+                    );
+                }
             }
-            .current_dir(&tigerbeetle_root)
-            .status()
-            .expect("running `download` script");
-            assert!(status.success(), "`download` script failed with {status:?}");
-
-            tigerbeetle_root
-                .join("zig/zig")
-                .with_extension(env::consts::EXE_EXTENSION)
-                .canonicalize()
-                .unwrap()
-        };
-
-        let status = Command::new(&zig_path)
-            .arg("build")
-            .arg("clients:c")
-            .args((!debug).then_some("-Drelease"))
-            .arg(format!("-Dtarget={tigerbeetle_target}"))
-            .arg(format!("-Dconfig-release={TIGERBEETLE_RELEASE}"))
-            .arg(format!("-Dconfig-release-client-min={TIGERBEETLE_RELEASE}"))
-            .arg(format!("-Dgit-commit={TIGERBEETLE_COMMIT}"))
-            .current_dir(&tigerbeetle_root)
-            .env_remove("CI")
-            .status()
-            .expect("running `zig build` subcommand");
-        assert!(status.success(), "`zig build` failed with {status:?}");
-
-        let c_dir = tigerbeetle_root.join("src/clients/c/");
-        let lib_dir = tigerbeetle_root.join("src/clients/c/lib");
-        let link_search = lib_dir.join(target_lib_subdir);
-        println!(
-            "cargo:rustc-link-search=native={}",
-            link_search
-                .to_str()
-                .expect("link search directory path is not valid unicode"),
-        );
-        if target == "x86_64-pc-windows-gnu" {
-            // `-gnu` toolchain looks for `lib<name>.a` file of a static library by default, but
-            // `zig build` produces `<name>.lib` despite using MinGW under-the-hood.
-            println!("cargo:rustc-link-lib=static:+verbatim=tb_client.lib");
-            // As of Rust 1.87, its `std` doesn't link `advapi32` automatically anymore, however
-            // the `tb_client` requires it.
-            // See: https://github.com/rust-lang/rust/pull/138233
-            //      https://github.com/rust-lang/rust/issues/139352
-            println!("cargo:rustc-link-lib=advapi32");
         } else {
-            println!("cargo:rustc-link-lib=static=tb_client");
-        }
-
-        wrapper = c_dir.join("wrapper.h");
-        let generated_header = c_dir.join("tb_client.h");
-        assert_eq!(
-            fs::read_to_string(&generated_header).expect("reading generated `tb_client.h`"),
-            fs::read_to_string("src/tb_client.h")
-                .expect("reading pre-generated `tb_client.h`")
-                .replace("\r\n", "\n"),
-            "generated and pre-generated `tb_client.h` headers must be equal, \
-             generated at: {generated_header:?}",
-        );
-        fs::copy("src/wrapper.h", &wrapper).expect("copying `wrapper.h`");
+            println!(
+                "cargo:warning=TigerBeetle prebuilt artifacts are not enabled; running ordinary \
+                 Zig build. Set TIGERBEETLE_USE_PREBUILT=1 and \
+                 TIGERBEETLE_PREBUILT_MANIFEST=/path/to/manifest.json to use repo vendor \
+                 artifacts."
+            );
+            build_with_zig(&out_dir, &target, target_lib_subdir, debug)
+        };
     };
 
     let bindings = bindgen::Builder::default()
@@ -216,6 +177,342 @@ fn main() {
 
         rustfmt(generated_path);
     }
+}
+
+#[derive(Debug)]
+struct PrebuiltPaths {
+    header: PathBuf,
+    wrapper: PathBuf,
+    library: PathBuf,
+}
+
+fn env_flag(name: &str) -> bool {
+    matches!(
+        env::var(name).as_deref(),
+        Ok("1") | Ok("true") | Ok("TRUE") | Ok("yes") | Ok("YES")
+    )
+}
+
+fn crate_path(path: impl AsRef<Path>) -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(path)
+}
+
+fn load_prebuilt(target: &str, target_lib_subdir: &str) -> Result<PrebuiltPaths, String> {
+    let manifest_path = prebuilt_manifest_path()?;
+    let manifest_dir = manifest_path
+        .parent()
+        .ok_or_else(|| format!("prebuilt manifest path has no parent: {manifest_path:?}"))?;
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+
+    let text = fs::read_to_string(&manifest_path)
+        .map_err(|e| format!("failed to read prebuilt manifest {manifest_path:?}: {e}"))?;
+    let manifest: PrebuiltManifest = serde_json::from_str(&text)
+        .map_err(|e| format!("failed to parse prebuilt manifest {manifest_path:?}: {e}"))?;
+
+    ensure(
+        manifest.schema_version == 1,
+        format!(
+            "unsupported manifest schema_version {:?}",
+            manifest.schema_version
+        ),
+    )?;
+    ensure(
+        manifest.tigerbeetle_release == TIGERBEETLE_RELEASE,
+        format!(
+            "manifest tigerbeetle_release {:?} != expected {TIGERBEETLE_RELEASE}",
+            manifest.tigerbeetle_release
+        ),
+    )?;
+    ensure(
+        manifest.tigerbeetle_commit == TIGERBEETLE_COMMIT,
+        format!(
+            "manifest tigerbeetle_commit {:?} != expected {TIGERBEETLE_COMMIT}",
+            manifest.tigerbeetle_commit
+        ),
+    )?;
+    ensure(
+        manifest.sys_crate_version == env!("CARGO_PKG_VERSION"),
+        format!(
+            "manifest sys_crate_version {:?} != expected {}",
+            manifest.sys_crate_version,
+            env!("CARGO_PKG_VERSION")
+        ),
+    )?;
+
+    let target_entry = manifest
+        .targets
+        .get(target)
+        .ok_or_else(|| format!("manifest has no artifact for Cargo target `{target}`"))?;
+    ensure(
+        target_entry.tigerbeetle_lib_subdir == target_lib_subdir,
+        format!(
+            "manifest target lib subdir {:?} != expected {target_lib_subdir}",
+            target_entry.tigerbeetle_lib_subdir
+        ),
+    )?;
+
+    let header = verify_manifest_file(manifest_dir, &manifest.headers.tb_client_h)?;
+    let wrapper = verify_manifest_file(manifest_dir, &manifest.headers.wrapper_h)?;
+    let library = verify_manifest_file(manifest_dir, &target_entry.lib)?;
+
+    Ok(PrebuiltPaths {
+        header,
+        wrapper,
+        library,
+    })
+}
+
+fn prebuilt_manifest_path() -> Result<PathBuf, String> {
+    if let Some(path) = env::var_os("TIGERBEETLE_PREBUILT_MANIFEST") {
+        return Ok(PathBuf::from(path));
+    }
+    if let Some(dir) = env::var_os("TIGERBEETLE_PREBUILT_DIR") {
+        return Ok(PathBuf::from(dir).join("manifest.json"));
+    }
+    Err(
+        "TIGERBEETLE_USE_PREBUILT=1 requires TIGERBEETLE_PREBUILT_MANIFEST or \
+         TIGERBEETLE_PREBUILT_DIR"
+            .into(),
+    )
+}
+
+fn verify_manifest_file(manifest_dir: &Path, file: &PrebuiltFile) -> Result<PathBuf, String> {
+    let path = manifest_dir.join(&file.path);
+    println!("cargo:rerun-if-changed={}", path.display());
+    let actual = sha256_file(&path)?;
+    ensure(
+        actual == file.sha256,
+        format!(
+            "sha256 mismatch for {}: actual {actual} != manifest {}",
+            path.display(),
+            file.sha256
+        ),
+    )?;
+    Ok(path)
+}
+
+fn sha256_file(path: &Path) -> Result<String, String> {
+    let bytes = fs::read(path)
+        .map_err(|e| format!("failed to read prebuilt artifact {}: {e}", path.display()))?;
+    let digest = Sha256::digest(&bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        use std::fmt::Write as _;
+        write!(&mut out, "{byte:02x}").expect("writing to String cannot fail");
+    }
+    Ok(out)
+}
+
+fn ensure(condition: bool, message: String) -> Result<(), String> {
+    if condition {
+        Ok(())
+    } else {
+        Err(message)
+    }
+}
+
+fn assert_prebuilt_headers_match_crate(prebuilt: &PrebuiltPaths) {
+    assert_eq!(
+        fs::read_to_string(&prebuilt.header).expect("reading prebuilt `tb_client.h`"),
+        fs::read_to_string(crate_path("src/tb_client.h"))
+            .expect("reading pre-generated `tb_client.h`")
+            .replace("\r\n", "\n"),
+        "prebuilt and crate `tb_client.h` headers must be equal, prebuilt at: {:?}",
+        prebuilt.header,
+    );
+    assert_eq!(
+        fs::read_to_string(&prebuilt.wrapper).expect("reading prebuilt `wrapper.h`"),
+        fs::read_to_string(crate_path("src/wrapper.h")).expect("reading crate `wrapper.h`"),
+        "prebuilt and crate `wrapper.h` headers must be equal, prebuilt at: {:?}",
+        prebuilt.wrapper,
+    );
+}
+
+fn emit_link_directives(target: &str, link_search: &Path) {
+    println!(
+        "cargo:rustc-link-search=native={}",
+        link_search
+            .to_str()
+            .expect("link search directory path is not valid unicode"),
+    );
+    if target == "x86_64-pc-windows-gnu" {
+        // `-gnu` toolchain looks for `lib<name>.a` file of a static library by default, but
+        // `zig build` produces `<name>.lib` despite using MinGW under-the-hood.
+        println!("cargo:rustc-link-lib=static:+verbatim=tb_client.lib");
+        // As of Rust 1.87, its `std` doesn't link `advapi32` automatically anymore, however
+        // the `tb_client` requires it.
+        // See: https://github.com/rust-lang/rust/pull/138233
+        //      https://github.com/rust-lang/rust/issues/139352
+        println!("cargo:rustc-link-lib=advapi32");
+    } else {
+        println!("cargo:rustc-link-lib=static=tb_client");
+    }
+}
+
+fn build_with_zig(out_dir: &Path, target: &str, target_lib_subdir: &str, debug: bool) -> PathBuf {
+    let tigerbeetle_target = target_to_tigerbeetle_target(target)
+        .unwrap_or_else(|| panic!("target `{target:?}` is not supported"));
+
+    let tigerbeetle_root = prepare_tigerbeetle_root(out_dir);
+
+    // Check for `ZIG_PATH` env var to use system preinstalled Zig instead of downloading one.
+    let zig_path: PathBuf = if let Some(zig_path) = env::var_os("ZIG_PATH") {
+        let path = PathBuf::from(&zig_path);
+        assert!(
+            path.exists(),
+            "`ZIG_PATH` is set to `{}` but the file does not exist",
+            path.display(),
+        );
+        path
+    } else {
+        // Download ZIG using the bundled downloader script.
+        let status = if cfg!(windows) {
+            let mut cmd = Command::new("pwsh");
+            _ = cmd.arg(tigerbeetle_root.join("zig/download.win.ps1"));
+            cmd
+        } else {
+            // TODO: Use the original `zig/download.sh` once tigerbeetle/tigerbeetle@394d012c
+            //       gets released.
+
+            let orig_path = tigerbeetle_root.join("zig/download.sh");
+            let patched_path = out_dir.join("zig_download.patched.sh");
+
+            let download_script = fs::read_to_string(&orig_path)
+                .expect("failed to read `zig/download.sh`")
+                .replace(
+                    "curl --silent --output",
+                    "curl --location --silent --output",
+                );
+            fs::copy(&orig_path, &patched_path).expect("failed to copy `zig/download.sh`");
+            fs::write(&patched_path, download_script).expect("failed to patch `zig/download.sh`");
+
+            Command::new(patched_path)
+        }
+        .current_dir(&tigerbeetle_root)
+        .status()
+        .expect("running `download` script");
+        assert!(status.success(), "`download` script failed with {status:?}");
+
+        tigerbeetle_root
+            .join("zig/zig")
+            .with_extension(env::consts::EXE_EXTENSION)
+            .canonicalize()
+            .unwrap()
+    };
+
+    let status = Command::new(&zig_path)
+        .arg("build")
+        .arg("clients:c")
+        .args((!debug).then_some("-Drelease"))
+        .arg(format!("-Dtarget={tigerbeetle_target}"))
+        .arg(format!("-Dconfig-release={TIGERBEETLE_RELEASE}"))
+        .arg(format!("-Dconfig-release-client-min={TIGERBEETLE_RELEASE}"))
+        .arg(format!("-Dgit-commit={TIGERBEETLE_COMMIT}"))
+        .current_dir(&tigerbeetle_root)
+        .env_remove("CI")
+        .status()
+        .expect("running `zig build` subcommand");
+    assert!(status.success(), "`zig build` failed with {status:?}");
+
+    let c_dir = tigerbeetle_root.join("src/clients/c/");
+    let lib_dir = tigerbeetle_root.join("src/clients/c/lib");
+    let link_search = lib_dir.join(target_lib_subdir);
+    emit_link_directives(target, &link_search);
+
+    let wrapper = c_dir.join("wrapper.h");
+    let generated_header = c_dir.join("tb_client.h");
+    assert_eq!(
+        fs::read_to_string(&generated_header).expect("reading generated `tb_client.h`"),
+        fs::read_to_string(crate_path("src/tb_client.h"))
+            .expect("reading pre-generated `tb_client.h`")
+            .replace("\r\n", "\n"),
+        "generated and pre-generated `tb_client.h` headers must be equal, \
+         generated at: {generated_header:?}",
+    );
+    fs::copy(crate_path("src/wrapper.h"), &wrapper).expect("copying `wrapper.h`");
+    wrapper
+}
+
+fn prepare_tigerbeetle_root(out_dir: &Path) -> PathBuf {
+    let tigerbeetle_root = out_dir.join("tigerbeetle");
+    remove_dir_if_exists(&tigerbeetle_root);
+
+    let bundled = crate_path("tigerbeetle");
+    if bundled.join("build.zig").exists() {
+        create_mirror(
+            &bundled,
+            &tigerbeetle_root,
+            &["src/clients/c/lib", "zig-cache", "zig-out", ".git"]
+                .into_iter()
+                .collect(),
+        );
+        return tigerbeetle_root;
+    }
+
+    println!(
+        "cargo:warning=TigerBeetle source submodule is not present in the sys crate checkout; \
+         downloading source archive for commit {TIGERBEETLE_COMMIT} before ordinary Zig build."
+    );
+    download_tigerbeetle_source(out_dir, &tigerbeetle_root);
+    tigerbeetle_root
+}
+
+fn download_tigerbeetle_source(out_dir: &Path, tigerbeetle_root: &Path) {
+    let archive = out_dir.join("tigerbeetle-source.tar.gz");
+    let url =
+        format!("https://github.com/tigerbeetle/tigerbeetle/archive/{TIGERBEETLE_COMMIT}.tar.gz");
+    let status = Command::new("curl")
+        .arg("-L")
+        .arg("--fail")
+        .arg("--retry")
+        .arg("3")
+        .arg("--retry-delay")
+        .arg("5")
+        .arg("--retry-all-errors")
+        .arg("--connect-timeout")
+        .arg("30")
+        .arg("--max-time")
+        .arg("900")
+        .arg("-o")
+        .arg(&archive)
+        .arg(&url)
+        .status()
+        .expect("running curl to download TigerBeetle source archive");
+    assert!(
+        status.success(),
+        "curl failed to download TigerBeetle source archive from {url}: {status:?}"
+    );
+
+    let unpack_dir = out_dir.join("tigerbeetle-source");
+    remove_dir_if_exists(&unpack_dir);
+    fs::create_dir(&unpack_dir).expect("creating TigerBeetle source unpack directory");
+
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&unpack_dir)
+        .arg("--strip-components=1")
+        .status()
+        .expect("running tar to extract TigerBeetle source archive");
+    assert!(
+        status.success(),
+        "tar failed to extract TigerBeetle source archive {archive:?}: {status:?}"
+    );
+    fs::rename(&unpack_dir, tigerbeetle_root)
+        .expect("moving extracted TigerBeetle source into build root");
+}
+
+fn remove_dir_if_exists(path: &Path) {
+    fs::remove_dir_all(path)
+        .or_else(|e| {
+            if let io::ErrorKind::NotFound = e.kind() {
+                Ok(())
+            } else {
+                Err(e)
+            }
+        })
+        .unwrap();
 }
 
 struct LintSuppressionVisitor;
