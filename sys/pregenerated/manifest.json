@@ -1,0 +1,22 @@
+{
+  "bindings": {
+    "aarch64-apple-darwin": {
+      "path": "aarch64-apple-darwin/bindings.rs",
+      "sha256": "d00e31075f0baf4f1c95745e2a6a00a5f6c28b5cc43b9c3c231fd48eb9b75b78"
+    },
+    "aarch64-unknown-linux-gnu": {
+      "path": "aarch64-unknown-linux-gnu/bindings.rs",
+      "sha256": "b65e0ddd9a24b7ef870e91528b738cd2c305ef092ca887fa0e718606f75475b8"
+    },
+    "x86_64-unknown-linux-gnu": {
+      "path": "x86_64-unknown-linux-gnu/bindings.rs",
+      "sha256": "51b8b431e58e6edcaf645afbb74cbe30e732c1b6a997afdf8f2143d3cd71b9c2"
+    }
+  },
+  "schema_version": 1,
+  "sys_crate_version": "0.14.28+0.16.78",
+  "tb_client_h_sha256": "ee3663a38da92cc939d41e40345633ecf794c8cce16ad868844946272854b4b7",
+  "tigerbeetle_commit": "c3d9b09dc88e94dde9ac915c6e94a4c650332080",
+  "tigerbeetle_release": "0.16.78",
+  "wrapper_h_sha256": "e8fa00b4a2a24e7f750378f04ab9fd990abfad3f9d2de60f3746182823c2cd4f"
+}

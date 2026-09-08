@@ -16,6 +16,9 @@ generated-safe = []
 bitflags = "2.6"
 bytemuck = { version = "1.19", features = ["derive", "min_const_generics"] }
 
+[dev-dependencies]
+sha2 = "0.10"
+
 [build-dependencies]
 bindgen = "0.72"
 itertools = "0.13"

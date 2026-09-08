@@ -52,6 +52,25 @@ struct PrebuiltFile {
     sha256: String,
 }
 
+/// Manifest of pregenerated `tb_client` Rust bindings shipped inside this crate
+/// (`pregenerated/manifest.json`), keyed by Cargo target triple.
+///
+/// This is independent of [`PrebuiltManifest`]: the latter is supplied externally
+/// via `TIGERBEETLE_PREBUILT_MANIFEST`/`TIGERBEETLE_PREBUILT_DIR` and vendors the
+/// compiled `tb_client` library and its headers, while this one is committed to
+/// the crate's own source tree and vendors the bindgen output itself, so that
+/// explicit prebuilt mode never has to invoke bindgen/libclang at all.
+#[derive(Debug, Deserialize)]
+struct PregeneratedBindingsManifest {
+    schema_version: u32,
+    tigerbeetle_release: String,
+    tigerbeetle_commit: String,
+    sys_crate_version: String,
+    tb_client_h_sha256: String,
+    wrapper_h_sha256: String,
+    bindings: BTreeMap<String, PrebuiltFile>,
+}
+
 fn target_to_lib_dir(target: &str) -> Option<&'static str> {
     match target {
         "aarch64-unknown-linux-gnu" => Some("aarch64-linux-gnu.2.27"),
@@ -91,7 +110,6 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TB_CLIENT_DEBUG");
     println!("cargo:rerun-if-env-changed=ZIG_PATH");
     println!("cargo:rerun-if-env-changed=TIGERBEETLE_USE_PREBUILT");
-    println!("cargo:rerun-if-env-changed=TIGERBEETLE_ALLOW_ZIG_FALLBACK");
     println!("cargo:rerun-if-env-changed=TIGERBEETLE_PREBUILT_DIR");
     println!("cargo:rerun-if-env-changed=TIGERBEETLE_PREBUILT_MANIFEST");
     println!(
@@ -103,33 +121,30 @@ fn main() {
         crate_path("src/tb_client.h").display()
     );
 
-    let wrapper;
-    if env::var("DOCS_RS").is_ok() {
-        wrapper = "src/wrapper.h".into();
+    let bindings_text: String = if env::var("DOCS_RS").is_ok() {
+        generate_bindings_via_bindgen(Path::new("src/wrapper.h"), &out_dir)
     } else {
         let target_lib_subdir = target_to_lib_dir(&target)
             .unwrap_or_else(|| panic!("target `{target:?}` is not supported"));
-        wrapper = if env_flag("TIGERBEETLE_USE_PREBUILT") {
+        if env_flag("TIGERBEETLE_USE_PREBUILT") {
             match load_prebuilt(&target, target_lib_subdir) {
                 Ok(prebuilt) => {
                     emit_link_directives(&target, prebuilt.library.parent().unwrap());
                     assert_prebuilt_headers_match_crate(&prebuilt);
-                    prebuilt.wrapper
-                }
-                Err(reason) if env_flag("TIGERBEETLE_ALLOW_ZIG_FALLBACK") => {
-                    println!(
-                        "cargo:warning=TigerBeetle prebuilt artifact unavailable for target \
-                         {target}; explicit TIGERBEETLE_ALLOW_ZIG_FALLBACK=1 set, running Zig \
-                         build. reason: {reason}"
-                    );
-                    build_with_zig(&out_dir, &target, target_lib_subdir, debug)
+                    // Pregenerated bindings are read verbatim: bindgen/libclang is
+                    // never invoked on this path.
+                    fs::read_to_string(&prebuilt.bindings).unwrap_or_else(|e| {
+                        panic!(
+                            "reading pregenerated `tb_client` bindings at {:?}: {e}",
+                            prebuilt.bindings
+                        )
+                    })
                 }
                 Err(reason) => {
                     panic!(
                         "TigerBeetle prebuilt artifact validation failed for target `{target}`: \
-                         {reason}. Explicit prebuilt mode is fail-closed; run \
-                         scripts/ci/update-tigerbeetle-client-vendor.sh or set \
-                         TIGERBEETLE_ALLOW_ZIG_FALLBACK=1 for an intentional fallback."
+                         {reason}. Explicit prebuilt mode is fail-closed; regenerate the \
+                         digest-locked prebuilt artifacts."
                     );
                 }
             }
@@ -140,25 +155,12 @@ fn main() {
                  TIGERBEETLE_PREBUILT_MANIFEST=/path/to/manifest.json to use repo vendor \
                  artifacts."
             );
-            build_with_zig(&out_dir, &target, target_lib_subdir, debug)
-        };
+            let wrapper = build_with_zig(&out_dir, &target, target_lib_subdir, debug);
+            generate_bindings_via_bindgen(&wrapper, &out_dir)
+        }
     };
 
-    let bindings = bindgen::Builder::default()
-        .header(
-            wrapper
-                .to_str()
-                .expect("`wrapper.h` out path is not valid unicode"),
-        )
-        .default_enum_style(bindgen::EnumVariation::ModuleConsts)
-        .parse_callbacks(Box::new(TigerbeetleCallbacks {
-            inner: bindgen::CargoCallbacks::default(),
-            out_dir: out_dir.clone(),
-        }))
-        .generate()
-        .expect("generating `tb_client` bindings");
-
-    let mut bindings = syn::parse_file(&bindings.to_string()).unwrap();
+    let mut bindings = syn::parse_file(&bindings_text).unwrap();
     LintSuppressionVisitor.visit_file_mut(&mut bindings);
 
     let bindings_path = out_dir.join("bindings.rs");
@@ -179,11 +181,30 @@ fn main() {
     }
 }
 
+/// Generates `tb_client` Rust bindings for `wrapper` header via `bindgen`.
+fn generate_bindings_via_bindgen(wrapper: &Path, out_dir: &Path) -> String {
+    bindgen::Builder::default()
+        .header(
+            wrapper
+                .to_str()
+                .expect("`wrapper.h` out path is not valid unicode"),
+        )
+        .default_enum_style(bindgen::EnumVariation::ModuleConsts)
+        .parse_callbacks(Box::new(TigerbeetleCallbacks {
+            inner: bindgen::CargoCallbacks::default(),
+            out_dir: out_dir.to_path_buf(),
+        }))
+        .generate()
+        .expect("generating `tb_client` bindings")
+        .to_string()
+}
+
 #[derive(Debug)]
 struct PrebuiltPaths {
     header: PathBuf,
     wrapper: PathBuf,
     library: PathBuf,
+    bindings: PathBuf,
 }
 
 fn env_flag(name: &str) -> bool {
@@ -238,7 +259,6 @@ fn load_prebuilt(target: &str, target_lib_subdir: &str) -> Result<PrebuiltPaths,
             env!("CARGO_PKG_VERSION")
         ),
     )?;
-
     let target_entry = manifest
         .targets
         .get(target)
@@ -254,12 +274,83 @@ fn load_prebuilt(target: &str, target_lib_subdir: &str) -> Result<PrebuiltPaths,
     let header = verify_manifest_file(manifest_dir, &manifest.headers.tb_client_h)?;
     let wrapper = verify_manifest_file(manifest_dir, &manifest.headers.wrapper_h)?;
     let library = verify_manifest_file(manifest_dir, &target_entry.lib)?;
+    let bindings = load_pregenerated_bindings(target)?;
 
     Ok(PrebuiltPaths {
         header,
         wrapper,
         library,
+        bindings,
     })
+}
+
+/// Path to the pregenerated bindings manifest committed inside this crate.
+///
+/// Unlike [`prebuilt_manifest_path`], this is not overridable via env vars: the
+/// pregenerated bindings are part of the crate's own source, not an externally
+/// vendored artifact.
+fn pregenerated_bindings_manifest_path() -> PathBuf {
+    crate_path("pregenerated/manifest.json")
+}
+
+fn load_pregenerated_bindings(target: &str) -> Result<PathBuf, String> {
+    let manifest_path = pregenerated_bindings_manifest_path();
+    let manifest_dir = manifest_path.parent().ok_or_else(|| {
+        format!("pregenerated bindings manifest path has no parent: {manifest_path:?}")
+    })?;
+    println!("cargo:rerun-if-changed={}", manifest_path.display());
+
+    let text = fs::read_to_string(&manifest_path).map_err(|e| {
+        format!("failed to read pregenerated bindings manifest {manifest_path:?}: {e}")
+    })?;
+    let manifest: PregeneratedBindingsManifest = serde_json::from_str(&text).map_err(|e| {
+        format!("failed to parse pregenerated bindings manifest {manifest_path:?}: {e}")
+    })?;
+
+    ensure(
+        manifest.schema_version == 1,
+        format!(
+            "unsupported pregenerated bindings manifest schema_version {:?}",
+            manifest.schema_version
+        ),
+    )?;
+    ensure(
+        manifest.tigerbeetle_release == TIGERBEETLE_RELEASE,
+        format!(
+            "pregenerated bindings manifest tigerbeetle_release {:?} != expected \
+             {TIGERBEETLE_RELEASE}",
+            manifest.tigerbeetle_release
+        ),
+    )?;
+    ensure(
+        manifest.tigerbeetle_commit == TIGERBEETLE_COMMIT,
+        format!(
+            "pregenerated bindings manifest tigerbeetle_commit {:?} != expected \
+             {TIGERBEETLE_COMMIT}",
+            manifest.tigerbeetle_commit
+        ),
+    )?;
+    ensure(
+        manifest.sys_crate_version == env!("CARGO_PKG_VERSION"),
+        format!(
+            "pregenerated bindings manifest sys_crate_version {:?} != expected {}",
+            manifest.sys_crate_version,
+            env!("CARGO_PKG_VERSION")
+        ),
+    )?;
+    ensure(
+        sha256_file(&crate_path("src/tb_client.h"))? == manifest.tb_client_h_sha256,
+        "pregenerated bindings input digest differs for crate src/tb_client.h".into(),
+    )?;
+    ensure(
+        sha256_file(&crate_path("src/wrapper.h"))? == manifest.wrapper_h_sha256,
+        "pregenerated bindings input digest differs for crate src/wrapper.h".into(),
+    )?;
+
+    let entry = manifest.bindings.get(target).ok_or_else(|| {
+        format!("pregenerated bindings manifest has no entry for Cargo target `{target}`")
+    })?;
+    verify_manifest_file(manifest_dir, entry)
 }
 
 fn prebuilt_manifest_path() -> Result<PathBuf, String> {
