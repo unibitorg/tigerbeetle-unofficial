@@ -2,7 +2,7 @@
 name = "tigerbeetle-unofficial-sys"
 version.workspace = true
 authors.workspace = true
-edition = "2021"
+edition.workspace = true
 rust-version.workspace = true
 description = "Native bindings to the tigerbeetle library"
 repository.workspace = true

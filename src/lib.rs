@@ -16,7 +16,7 @@ use core::{
     util::{RawConstPtr, SendAsBytesOwnedSlice, SendOwnedSlice},
 };
 
-pub use core::{self, account, error, transfer, Account, Packet, QueryFilter, Transfer};
+pub use core::{self, Account, Packet, QueryFilter, Transfer, account, error, transfer};
 
 pub use self::id::id;
 

@@ -9,7 +9,7 @@ use std::{
     process::Command,
 };
 
-use quote::{quote, ToTokens as _};
+use quote::{ToTokens as _, quote};
 use syn::{parse_quote, visit::Visit, visit_mut::VisitMut};
 
 /// Version of the used [TigerBeetle] release.
@@ -184,6 +184,8 @@ fn main() {
     };
 
     let bindings = bindgen::Builder::default()
+        .rust_target(bindgen::RustTarget::stable(85, 0).expect("valid MSRV"))
+        .rust_edition(bindgen::RustEdition::Edition2024)
         .header(
             wrapper
                 .to_str()
@@ -787,6 +789,7 @@ fn rustfmt(file: impl AsRef<Path>) {
     let file = file.as_ref();
 
     Command::new(env::var("RUSTFMT").unwrap_or_else(|_| "rustfmt".into()))
+        .args(["--edition", "2024"])
         .arg(file)
         .status()
         .unwrap_or_else(|e| panic!("failed to run `rustfmt` on {}: {e}", file.display()));

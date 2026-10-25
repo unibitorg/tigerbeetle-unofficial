@@ -114,24 +114,26 @@ pub(crate) unsafe extern "C" fn completion_callback_raw_fn<F>(
 ) where
     F: Callbacks,
 {
-    let _ = catch_unwind(|| {
-        let cb = &*sptr::from_exposed_addr::<F>(ctx);
-        let payload_size = payload_size.try_into().expect(
-            "at the start of calling `completion_callback`: \
+    unsafe {
+        let _ = catch_unwind(|| {
+            let cb = &*sptr::from_exposed_addr::<F>(ctx);
+            let payload_size = payload_size.try_into().expect(
+                "at the start of calling `completion_callback`: \
              unable to convert `payload_size` from `u32` into `usize`",
-        );
-        let payload = if payload_size != 0 {
-            slice::from_raw_parts(payload, payload_size)
-        } else {
-            &[]
-        };
-        let packet = Packet {
-            raw: packet,
-            _ptr: PhantomData,
-        };
-        let timestamp = SystemTime::UNIX_EPOCH + Duration::from_nanos(timestamp);
-        cb.completion(packet, Some(Reply { payload, timestamp }))
-    });
+            );
+            let payload = if payload_size != 0 {
+                slice::from_raw_parts(payload, payload_size)
+            } else {
+                &[]
+            };
+            let packet = Packet {
+                raw: packet,
+                _ptr: PhantomData,
+            };
+            let timestamp = SystemTime::UNIX_EPOCH + Duration::from_nanos(timestamp);
+            cb.completion(packet, Some(Reply { payload, timestamp }))
+        });
+    }
 }
 
 // `Self: Send` because we are sending user_data into the callback as an
