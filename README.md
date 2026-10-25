@@ -60,3 +60,7 @@ Unless required by applicable law or agreed to in writing, software distributed 
 [1]: https://github.com/tigerbeetle
 [2]: https://en.wikipedia.org/wiki/Backward_compatibility
 [3]: https://en.wikipedia.org/wiki/Forward_compatibility
+
+## 开发环境
+
+开发环境初始化：运行 `bash scripts/init-env.sh` 安装组织 prek hooks；预先准备 Python ≥ 3.11、仓库指定工具链的 rustfmt，提交时自动应用机械格式修复；已有安装运行 `bash scripts/init-env.sh --update` 刷新分发器。
