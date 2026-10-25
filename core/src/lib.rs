@@ -88,26 +88,28 @@ where
             completion_ctx: usize,
             completion_callback: CompletionCallbackRawFn,
         ) -> Result<Pin<Box<UnsafeCell<sys::tb_client_t>>>, NewClientError> {
-            let mut raw = Box::pin(UnsafeCell::new(mem::zeroed()));
-            let status = sys::tb_client_init(
-                raw.as_mut().get_unchecked_mut().get_mut(),
-                cluster_id.to_le_bytes().as_ptr(),
-                address.as_ptr().cast(),
-                address
-                    .len()
-                    .try_into()
-                    .map_err(|_| NewClientErrorKind::AddressInvalid)?,
-                completion_ctx,
-                Some(completion_callback),
-            );
+            unsafe {
+                let mut raw = Box::pin(UnsafeCell::new(mem::zeroed()));
+                let status = sys::tb_client_init(
+                    raw.as_mut().get_unchecked_mut().get_mut(),
+                    cluster_id.to_le_bytes().as_ptr(),
+                    address.as_ptr().cast(),
+                    address
+                        .len()
+                        .try_into()
+                        .map_err(|_| NewClientErrorKind::AddressInvalid)?,
+                    completion_ctx,
+                    Some(completion_callback),
+                );
 
-            // SAFETY: Unwrapping is OK here, because the returned `TB_INIT_STATUS` is actually an
-            //         enum with positive discriminant undoubtedly fitting into `u32`.
-            #[allow(clippy::useless_conversion)] // not true for Windows
-            if let Some(c) = NonZeroU32::new(status.try_into().unwrap_unchecked()) {
-                Err(NewClientError(c))
-            } else {
-                Ok(raw)
+                // SAFETY: Unwrapping is OK here, because the returned `TB_INIT_STATUS` is actually an
+                //         enum with positive discriminant undoubtedly fitting into `u32`.
+                #[allow(clippy::useless_conversion)] // not true for Windows
+                if let Some(c) = NonZeroU32::new(status.try_into().unwrap_unchecked()) {
+                    Err(NewClientError(c))
+                } else {
+                    Ok(raw)
+                }
             }
         }
 

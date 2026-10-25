@@ -2,7 +2,7 @@
 name = "tigerbeetle-unofficial-core"
 version.workspace = true
 authors.workspace = true
-edition = "2021"
+edition.workspace = true
 rust-version.workspace = true
 description = "Safe low level callback-based async bindings to tigerbeetle client library."
 repository.workspace = true

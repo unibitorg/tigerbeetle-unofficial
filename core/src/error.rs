@@ -1,7 +1,7 @@
 use std::{
     error::Error,
     fmt, mem,
-    num::{NonZeroU32, NonZeroU8},
+    num::{NonZeroU8, NonZeroU32},
 };
 
 pub use sys::{
@@ -258,15 +258,17 @@ impl CreateAccountsIndividualApiError {
     pub unsafe fn vec_from_raw_results_unchecked(
         v: Vec<RawCreateAccountsIndividualApiResult>,
     ) -> Vec<Self> {
-        let mut v = mem::ManuallyDrop::new(v);
-        let len = v.len();
-        let cap = v.capacity();
-        let ptr = v.as_mut_ptr().cast::<CreateAccountsIndividualApiError>();
-        // SAFETY: this is fine because `Vec::from_raw_parts` has pretty loose
-        // safety requirements, and since `CreateAccountsIndividualApiError` is
-        // just a transparent wrapper of `RawCreateAccountsIndividualApiResult`
-        // this is safe.
-        Vec::from_raw_parts(ptr, len, cap)
+        unsafe {
+            let mut v = mem::ManuallyDrop::new(v);
+            let len = v.len();
+            let cap = v.capacity();
+            let ptr = v.as_mut_ptr().cast::<CreateAccountsIndividualApiError>();
+            // SAFETY: this is fine because `Vec::from_raw_parts` has pretty loose
+            // safety requirements, and since `CreateAccountsIndividualApiError` is
+            // just a transparent wrapper of `RawCreateAccountsIndividualApiResult`
+            // this is safe.
+            Vec::from_raw_parts(ptr, len, cap)
+        }
     }
 
     /// Get index of the failed account.
@@ -510,15 +512,17 @@ impl CreateTransfersIndividualApiError {
     pub unsafe fn vec_from_raw_results_unchecked(
         v: Vec<RawCreateTransfersIndividualApiResult>,
     ) -> Vec<Self> {
-        let mut v = mem::ManuallyDrop::new(v);
-        let len = v.len();
-        let cap = v.capacity();
-        let ptr = v.as_mut_ptr().cast::<CreateTransfersIndividualApiError>();
-        // SAFETY: this is fine because `Vec::from_raw_parts` has pretty loose
-        // safety requirements, and since `CreateTransfersIndividualApiError` is
-        // just a transparent wrapper of `RawCreateTransfersIndividualApiResult`
-        // this is safe.
-        Vec::from_raw_parts(ptr, len, cap)
+        unsafe {
+            let mut v = mem::ManuallyDrop::new(v);
+            let len = v.len();
+            let cap = v.capacity();
+            let ptr = v.as_mut_ptr().cast::<CreateTransfersIndividualApiError>();
+            // SAFETY: this is fine because `Vec::from_raw_parts` has pretty loose
+            // safety requirements, and since `CreateTransfersIndividualApiError` is
+            // just a transparent wrapper of `RawCreateTransfersIndividualApiResult`
+            // this is safe.
+            Vec::from_raw_parts(ptr, len, cap)
+        }
     }
 
     /// Get index of the failed transfer.

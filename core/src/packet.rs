@@ -3,7 +3,7 @@ use std::{ffi::c_void, marker::PhantomData, mem, num::NonZeroU8, ptr};
 pub use sys::generated_safe::OperationKind;
 
 use super::callback::{UserData, UserDataPtr};
-use crate::error::{sys_safe, SendError};
+use crate::error::{SendError, sys_safe};
 
 pub struct Packet<U>
 where
