@@ -1,0 +1,21 @@
+name: Edition migration baseline probe
+on:
+  pull_request:
+    branches: ["main"]
+    paths: [".github/workflows/edition-2024-baseline.yml"]
+permissions:
+  contents: read
+jobs:
+  macos-baseline:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: bdc529ce74c130a0e11e1ad1b4c1ea213aa11e25
+          submodules: true
+      - uses: dtolnay/rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: rustfmt
+      - name: Test unchanged edition 2021 baseline
+        run: cargo test -p tigerbeetle-unofficial-sys --all-features
